@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HeartSense — BLE Biosignal Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0d0e;
+    --panel:#11171a;
+    --panel-2:#161d20;
+    --line:#232d31;
+    --text:#e7edee;
+    --text-dim:#7d8b8f;
+    --green:#4ce0a5;
+    --amber:#f2b84b;
+    --red:#ff6b5e;
+    --blue:#5fb0e3;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
+    font-family:'JetBrains Mono',monospace;}
+  h1,h2,h3,.display{font-family:'Space Grotesk',sans-serif;}
+  ::selection{background:var(--green);color:#04140d;}
+
+  .wrap{max-width:1180px;margin:0 auto;padding:20px 20px 60px;}
+
+  header{display:flex;justify-content:space-between;align-items:flex-end;
+    border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:18px;flex-wrap:wrap;gap:12px;}
+  header .brand{display:flex;align-items:center;gap:12px;}
+  .pulse-dot{width:14px;height:14px;border-radius:50%;background:var(--red);
+    box-shadow:0 0 0 0 rgba(255,107,94,.6);flex-shrink:0;}
+  .pulse-dot.beat{animation:beat .12s ease-out;}
+  @keyframes beat{0%{transform:scale(1);}30%{transform:scale(1.9);box-shadow:0 0 0 10px rgba(255,107,94,0);}100%{transform:scale(1);}}
+  header h1{font-size:22px;font-weight:700;margin:0;letter-spacing:.2px;}
+  header .tag{color:var(--text-dim);font-size:12px;margin-top:2px;}
+
+  .statusline{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--text-dim);}
+  .statusline b{color:var(--text);font-weight:500;}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;background:#3a4548;}
+  .dot.on{background:var(--green);box-shadow:0 0 6px var(--green);}
+  .dot.warn{background:var(--amber);box-shadow:0 0 6px var(--amber);}
+
+  .grid{display:grid;grid-template-columns:280px 1fr;gap:16px;}
+  @media (max-width:880px){.grid{grid-template-columns:1fr;}}
+
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;}
+  .panel + .panel{margin-top:16px;}
+  .panel h3{margin:0 0 12px;font-size:11px;letter-spacing:1.4px;text-transform:uppercase;
+    color:var(--text-dim);font-weight:600;}
+
+  button{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:500;
+    background:var(--panel-2);color:var(--text);border:1px solid var(--line);
+    border-radius:7px;padding:10px 14px;cursor:pointer;width:100%;margin-bottom:8px;
+    transition:border-color .15s, background .15s;}
+  button:hover:not(:disabled){border-color:var(--green);}
+  button:disabled{opacity:.35;cursor:not-allowed;}
+  button.primary{background:var(--green);color:#04140d;border-color:var(--green);font-weight:700;}
+  button.primary:hover:not(:disabled){background:#5cf0b5;}
+  button.stop{background:var(--red);color:#210a08;border-color:var(--red);font-weight:700;}
+  button.ghost{background:transparent;}
+
+  label{display:block;font-size:11px;color:var(--text-dim);margin:10px 0 4px;text-transform:uppercase;letter-spacing:.8px;}
+  select,input[type=range]{width:100%;background:var(--panel-2);color:var(--text);
+    border:1px solid var(--line);border-radius:6px;padding:7px;font-family:inherit;font-size:12px;}
+  .rangeval{font-size:12px;color:var(--green);float:right;}
+
+  .kv{display:flex;justify-content:space-between;font-size:12px;padding:5px 0;
+    border-bottom:1px dashed var(--line);}
+  .kv:last-child{border-bottom:none;}
+  .kv span:first-child{color:var(--text-dim);}
+
+  .bpm-card{text-align:center;padding:20px 16px;}
+  .bpm-num{font-family:'Space Grotesk',sans-serif;font-size:56px;font-weight:700;
+    color:var(--red);line-height:1;}
+  .bpm-lbl{font-size:11px;color:var(--text-dim);letter-spacing:1.4px;margin-top:6px;text-transform:uppercase;}
+
+  .scope-title{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;}
+  .scope-title span.unit{font-size:11px;color:var(--text-dim);}
+  canvas{width:100%;display:block;border-radius:6px;background:#080a0b;}
+
+  .console{height:130px;overflow-y:auto;font-size:11.5px;line-height:1.6;color:var(--text-dim);}
+  .console div.err{color:var(--red);}
+  .console div.ok{color:var(--green);}
+
+  .footer-row{display:flex;gap:10px;margin-top:16px;}
+  .footer-row button{margin-bottom:0;}
+
+  a.hint{color:var(--blue);text-decoration:none;}
+  a.hint:hover{text-decoration:underline;}
+  .warn-banner{background:#241a0c;border:1px solid #4a3416;color:var(--amber);
+    padding:10px 14px;border-radius:8px;font-size:12px;margin-bottom:16px;display:none;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="warn-banner" id="httpsWarning">
+    Web Bluetooth requires HTTPS (or localhost) and Chrome/Edge on desktop or Android. Serve this file
+    over a secure origin, e.g. <code>npx serve</code>, or open it via <code>localhost</code>.
+  </div>
+
+  <header>
+    <div class="brand">
+      <div class="pulse-dot" id="pulseDot"></div>
+      <div>
+        <h1>HeartSense</h1>
+        <div class="tag">BLE biosignal monitor — MPU6050 + electret mic · XIAO ESP32S3</div>
+      </div>
+    </div>
+    <div class="statusline">
+      <div><span class="dot" id="dotConn"></span><b id="connText">disconnected</b></div>
+      <div><span class="dot" id="dotSync"></span><b id="syncText">not synced</b></div>
+      <div>UTC <b id="utcClock">--:--:--</b></div>
+      <div>IST <b id="istClock">--:--:--</b></div>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- LEFT: controls -->
+    <div>
+      <div class="panel">
+        <h3>Connection</h3>
+        <button class="primary" id="btnConnect">Connect device</button>
+        <button class="ghost" id="btnDisconnect" disabled>Disconnect</button>
+      </div>
+
+      <div class="panel">
+        <h3>Streaming</h3>
+        <button class="primary" id="btnStart" disabled>Start streaming</button>
+        <button class="stop" id="btnStop" disabled>Stop streaming</button>
+
+        <label>Audio sample rate <span class="rangeval" id="audioRateVal">2000 Hz</span></label>
+        <select id="audioRate">
+          <option value="500">500 Hz</option>
+          <option value="1000">1000 Hz</option>
+          <option value="2000" selected>2000 Hz (default)</option>
+          <option value="4000">4000 Hz</option>
+        </select>
+
+        <label>Packet interval <span class="rangeval" id="pktIntervalVal">20 ms</span></label>
+        <input type="range" id="pktInterval" min="10" max="50" step="5" value="20">
+
+        <button class="ghost" id="btnApplyConfig" disabled style="margin-top:10px;">Apply config</button>
+      </div>
+
+      <div class="panel">
+        <h3>Session</h3>
+        <div class="kv"><span>Packets</span><span id="statPkts">0</span></div>
+        <div class="kv"><span>IMU samples</span><span id="statImu">0</span></div>
+        <div class="kv"><span>Audio samples</span><span id="statAud">0</span></div>
+        <div class="kv"><span>Dropped (device)</span><span id="statDrop">0 / 0</span></div>
+        <div class="kv"><span>Packet rate</span><span id="statPktRate">0 /s</span></div>
+        <div class="footer-row">
+          <button class="ghost" id="btnExport">Export CSV</button>
+          <button class="ghost" id="btnClear">Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: scopes -->
+    <div>
+      <div class="panel bpm-card">
+        <div class="bpm-num" id="bpmNum">--</div>
+        <div class="bpm-lbl">Estimated BPM (experimental, accel-derived — not a medical measurement)</div>
+      </div>
+
+      <div class="panel">
+        <div class="scope-title"><h3 style="margin:0;">Accelerometer · ballistocardiogram-style trace</h3><span class="unit">g, |a| high-pass filtered</span></div>
+        <canvas id="scopeAccel" height="140"></canvas>
+      </div>
+
+      <div class="panel">
+        <div class="scope-title"><h3 style="margin:0;">Microphone · phonocardiogram-style trace</h3><span class="unit">raw ADC (8-bit)</span></div>
+        <canvas id="scopeAudio" height="140"></canvas>
+      </div>
+
+      <div class="panel">
+        <h3>Log</h3>
+        <div class="console" id="log"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// Config / UUIDs — must match the firmware
+// ---------------------------------------------------------------------------
+const SVC_UUID  = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const CHR_DATA  = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const CHR_TIME  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+const CHR_CTRL  = "6e400004-b5a3-f393-e0a9-e50e24dcca9e";
+const CHR_STAT  = "6e400005-b5a3-f393-e0a9-e50e24dcca9e";
+
+const IST_OFFSET_MS = 5.5 * 3600 * 1000;
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+let device=null, gatt=null, dataChar=null, timeChar=null, ctrlChar=null, statChar=null;
+let connected=false;
+
+let stat = { pkts:0, imu:0, aud:0, dropImu:0, dropAud:0 };
+let pktTimestamps = [];
+
+// Rolling recording buffers (for CSV export). Each row: [t_epoch_ms, kind, ...values]
+let recImu = [];   // {t, ax,ay,az,gx,gy,gz}
+let recAud = [];   // {t, v}
+const MAX_RECORD_ROWS = 400000; // safety cap (~ a few minutes at full rate); Clear to reset
+
+// ---------------------------------------------------------------------------
+// UI helpers
+// ---------------------------------------------------------------------------
+const $ = id => document.getElementById(id);
+function log(msg, cls){
+  const el = document.createElement('div');
+  if (cls) el.className = cls;
+  const t = new Date().toLocaleTimeString();
+  el.textContent = `[${t}] ${msg}`;
+  $('log').appendChild(el);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+function setConn(state){
+  connected = state;
+  $('dotConn').className = 'dot' + (state ? ' on' : '');
+  $('connText').textContent = state ? 'connected' : 'disconnected';
+  $('btnConnect').disabled = state;
+  $('btnDisconnect').disabled = !state;
+  $('btnStart').disabled = !state;
+  $('btnApplyConfig').disabled = !state;
+  if(!state){ $('btnStop').disabled = true; $('dotSync').className='dot'; $('syncText').textContent='not synced'; }
+}
+
+if (!navigator.bluetooth) { $('httpsWarning').style.display = 'block'; }
+
+// ---------------------------------------------------------------------------
+// Connect / disconnect
+// ---------------------------------------------------------------------------
+$('btnConnect').addEventListener('click', async () => {
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SVC_UUID] }],
+      optionalServices: [SVC_UUID]
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    log(`Pairing with ${device.name || 'device'}...`);
+    gatt = await device.gatt.connect();
+    const svc = await gatt.getPrimaryService(SVC_UUID);
+    dataChar = await svc.getCharacteristic(CHR_DATA);
+    timeChar = await svc.getCharacteristic(CHR_TIME);
+    ctrlChar = await svc.getCharacteristic(CHR_CTRL);
+    statChar = await svc.getCharacteristic(CHR_STAT);
+
+    await dataChar.startNotifications();
+    dataChar.addEventListener('characteristicvaluechanged', onDataNotify);
+    await statChar.startNotifications();
+    statChar.addEventListener('characteristicvaluechanged', onStatusNotify);
+
+    setConn(true);
+    log('Connected.', 'ok');
+    await syncTime();
+  } catch (e) {
+    log('Connect failed: ' + e, 'err');
+  }
+});
+
+$('btnDisconnect').addEventListener('click', () => {
+  if (device && device.gatt.connected) device.gatt.disconnect();
+});
+
+function onDisconnected(){
+  setConn(false);
+  log('Disconnected.', 'err');
+}
+
+// ---------------------------------------------------------------------------
+// Time sync — write 8-byte little-endian unix epoch (ms) to CHR_TIME
+// ---------------------------------------------------------------------------
+async function syncTime(){
+  try {
+    const now = BigInt(Date.now());
+    const buf = new ArrayBuffer(8);
+    new DataView(buf).setBigUint64(0, now, true);
+    await timeChar.writeValueWithResponse(buf);
+    $('dotSync').className = 'dot on';
+    $('syncText').textContent = 'synced';
+    log('Time synced (epoch ' + now + ' ms).', 'ok');
+  } catch (e) {
+    log('Time sync failed: ' + e, 'err');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming controls
+// ---------------------------------------------------------------------------
+$('btnStart').addEventListener('click', async () => {
+  await ctrlChar.writeValueWithResponse(new Uint8Array([0x01]));
+  $('btnStart').disabled = true; $('btnStop').disabled = false;
+  log('Streaming started.', 'ok');
+});
+$('btnStop').addEventListener('click', async () => {
+  await ctrlChar.writeValueWithResponse(new Uint8Array([0x00]));
+  $('btnStart').disabled = false; $('btnStop').disabled = true;
+  log('Streaming stopped.');
+});
+$('btnApplyConfig').addEventListener('click', async () => {
+  const rate = parseInt($('audioRate').value, 10);
+  const interval = parseInt($('pktInterval').value, 10);
+  const buf = new Uint8Array(4);
+  buf[0] = 0x02;
+  buf[1] = rate & 0xFF;
+  buf[2] = (rate >> 8) & 0xFF;
+  buf[3] = interval;
+  await ctrlChar.writeValueWithResponse(buf);
+  log(`Config applied: audio=${rate}Hz, packet=${interval}ms`);
+});
+$('audioRate').addEventListener('change', e => $('audioRateVal').textContent = e.target.value + ' Hz');
+$('pktInterval').addEventListener('input', e => $('pktIntervalVal').textContent = e.target.value + ' ms');
+
+// ---------------------------------------------------------------------------
+// Status notifications (plain text from device)
+// ---------------------------------------------------------------------------
+function onStatusNotify(ev){
+  const txt = new TextDecoder().decode(ev.target.value);
+  const kv = {};
+  txt.split(';').forEach(p => { const [k,v] = p.split('='); if(k) kv[k]=v; });
+  if (kv.dropped_imu !== undefined) $('statDrop').textContent = `${kv.dropped_imu} / ${kv.dropped_audio}`;
+}
+
+// ---------------------------------------------------------------------------
+// Data notifications — binary packet parsing
+//   Header (14B): epoch_s u32 LE, epoch_ms u16 LE, seq u16 LE,
+//                 n_imu u8, n_audio u8, imu_rate u16 LE, audio_rate u16 LE
+//   IMU samples: n_imu * (ax,ay,az,gx,gy,gz int16 LE) = 12B each
+//   Audio samples: n_audio * uint8
+// ---------------------------------------------------------------------------
+function onDataNotify(ev){
+  const dv = new DataView(ev.target.value.buffer);
+  let off = 0;
+  const epoch_s = dv.getUint32(off, true); off += 4;
+  const epoch_ms = dv.getUint16(off, true); off += 2;
+  const seq = dv.getUint16(off, true); off += 2;
+  const nImu = dv.getUint8(off); off += 1;
+  const nAud = dv.getUint8(off); off += 1;
+  const imuRate = dv.getUint16(off, true); off += 2;
+  const audRate = dv.getUint16(off, true); off += 2;
+  const baseMs = epoch_s * 1000 + epoch_ms;
+
+  for (let i = 0; i < nImu; i++) {
+    const ax = dv.getInt16(off, true); off += 2;
+    const ay = dv.getInt16(off, true); off += 2;
+    const az = dv.getInt16(off, true); off += 2;
+    const gx = dv.getInt16(off, true); off += 2;
+    const gy = dv.getInt16(off, true); off += 2;
+    const gz = dv.getInt16(off, true); off += 2;
+    const t = baseMs + Math.round(i * 1000 / (imuRate || 200));
+    const sample = { t, ax, ay, az, gx, gy, gz };
+    pushImuSample(sample);
+    if (recImu.length < MAX_RECORD_ROWS) recImu.push(sample);
+  }
+  for (let i = 0; i < nAud; i++) {
+    const v = dv.getUint8(off); off += 1;
+    const t = baseMs + Math.round(i * 1000 / (audRate || 2000));
+    pushAudSample(v);
+    if (recAud.length < MAX_RECORD_ROWS) recAud.push({ t, v });
+  }
+
+  stat.pkts++; stat.imu += nImu; stat.aud += nAud;
+  pktTimestamps.push(performance.now());
+  if (pktTimestamps.length > 100) pktTimestamps.shift();
+  updateStatsUI();
+}
+
+function updateStatsUI(){
+  $('statPkts').textContent = stat.pkts;
+  $('statImu').textContent = stat.imu;
+  $('statAud').textContent = stat.aud;
+  if (pktTimestamps.length > 1) {
+    const span = (pktTimestamps[pktTimestamps.length-1] - pktTimestamps[0]) / 1000;
+    const rate = span > 0 ? (pktTimestamps.length-1) / span : 0;
+    $('statPktRate').textContent = rate.toFixed(1) + ' /s';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Clocks (UTC / IST) — ticks from local wall clock once synced feel is fine
+// for display; real sample timestamps come from the device's synced epoch.
+// ---------------------------------------------------------------------------
+setInterval(() => {
+  const now = Date.now();
+  $('utcClock').textContent = new Date(now).toISOString().substr(11,8);
+  $('istClock').textContent = new Date(now + IST_OFFSET_MS).toISOString().substr(11,8);
+}, 1000);
+
+// ---------------------------------------------------------------------------
+// Scrolling oscilloscope canvases
+// ---------------------------------------------------------------------------
+function setupCanvas(id){
+  const c = $(id);
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = c.clientWidth || 600, cssH = 140;
+  c.width = cssW * dpr; c.height = cssH * dpr;
+  const ctx = c.getContext('2d');
+  ctx.scale(dpr, dpr);
+  return { c, ctx, w: cssW, h: cssH };
+}
+let accelScope = setupCanvas('scopeAccel');
+let audioScope = setupCanvas('scopeAudio');
+window.addEventListener('resize', () => { accelScope = setupCanvas('scopeAccel'); audioScope = setupCanvas('scopeAudio'); });
+
+const ACCEL_BUF_N = 600, AUDIO_BUF_N = 800;
+const accelBuf = new Float32Array(ACCEL_BUF_N);
+const audioBuf = new Float32Array(AUDIO_BUF_N);
+let accelPtr = 0, audioPtr = 0;
+
+function drawScope(scope, buf, ptr, color){
+  const { ctx, w, h } = scope;
+  ctx.clearRect(0,0,w,h);
+  // gridlines
+  ctx.strokeStyle = '#1c2427'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for(let x=0;x<w;x+=40){ ctx.moveTo(x,0); ctx.lineTo(x,h); }
+  ctx.moveTo(0,h/2); ctx.lineTo(w,h/2);
+  ctx.stroke();
+
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+  const n = buf.length;
+  for (let i=0;i<n;i++){
+    const idx = (ptr + i) % n;
+    const x = (i/n) * w;
+    const y = h/2 - buf[idx] * (h*0.42);
+    if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+}
+
+function animate(){
+  drawScope(accelScope, accelBuf, accelPtr, getComputedStyle(document.documentElement).getPropertyValue('--green').trim() || '#4ce0a5');
+  drawScope(audioScope, audioBuf, audioPtr, getComputedStyle(document.documentElement).getPropertyValue('--amber').trim() || '#f2b84b');
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+
+// ---------------------------------------------------------------------------
+// Lightweight BPM estimator from accel magnitude
+// Approach: |a| -> subtract slow EMA (high-pass) -> smooth (low-pass) ->
+// adaptive-threshold peak pick with a refractory period. Illustrative only.
+// ---------------------------------------------------------------------------
+let emaSlow = 1.0, emaFast = 0;
+let lastBeatT = 0, bpmSmoothed = 0;
+let rmsEma = 0.02;
+
+function pushImuSample(s){
+  const ax = s.ax/16384, ay = s.ay/16384, az = s.az/16384;
+  const mag = Math.sqrt(ax*ax + ay*ay + az*az);
+
+  emaSlow += (mag - emaSlow) * 0.01;      // ~slow baseline (gravity + drift)
+  const hp = mag - emaSlow;                // AC component
+  emaFast += (hp - emaFast) * 0.25;        // light smoothing
+  rmsEma += (Math.abs(emaFast) - rmsEma) * 0.02;
+
+  accelBuf[accelPtr] = Math.max(-1, Math.min(1, emaFast / Math.max(rmsEma*4, 0.005)));
+  accelPtr = (accelPtr + 1) % ACCEL_BUF_N;
+
+  const threshold = rmsEma * 2.2;
+  const nowT = s.t;
+  if (emaFast > threshold && (nowT - lastBeatT) > 300) { // 300ms refractory -> max 200bpm
+    if (lastBeatT > 0) {
+      const instBpm = 60000 / (nowT - lastBeatT);
+      if (instBpm > 30 && instBpm < 220) {
+        bpmSmoothed = bpmSmoothed === 0 ? instBpm : bpmSmoothed*0.7 + instBpm*0.3;
+        $('bpmNum').textContent = Math.round(bpmSmoothed);
+        $('pulseDot').classList.remove('beat'); void $('pulseDot').offsetWidth; $('pulseDot').classList.add('beat');
+      }
+    }
+    lastBeatT = nowT;
+  }
+}
+
+function pushAudSample(v){
+  audioBuf[audioPtr] = (v - 128) / 128;
+  audioPtr = (audioPtr + 1) % AUDIO_BUF_N;
+}
+
+// ---------------------------------------------------------------------------
+// CSV export — separate IMU and audio streams, IST + UTC timestamps, ready
+// for offline signal-processing / ML pipelines.
+// ---------------------------------------------------------------------------
+function toISTString(ms){
+  return new Date(ms + IST_OFFSET_MS).toISOString().replace('T',' ').replace('Z','') + ' IST';
+}
+function download(filename, text){
+  const blob = new Blob([text], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+$('btnExport').addEventListener('click', () => {
+  if (recImu.length){
+    let csv = 'epoch_ms,utc_iso,ist,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps\n';
+    for (const s of recImu){
+      csv += [s.t, new Date(s.t).toISOString(), toISTString(s.t),
+              (s.ax/16384).toFixed(5), (s.ay/16384).toFixed(5), (s.az/16384).toFixed(5),
+              (s.gx/131).toFixed(3), (s.gy/131).toFixed(3), (s.gz/131).toFixed(3)].join(',') + '\n';
+    }
+    download(`heartsense_imu_${Date.now()}.csv`, csv);
+  }
+  if (recAud.length){
+    let csv = 'epoch_ms,utc_iso,ist,adc_8bit\n';
+    for (const s of recAud){
+      csv += [s.t, new Date(s.t).toISOString(), toISTString(s.t), s.v].join(',') + '\n';
+    }
+    download(`heartsense_audio_${Date.now()}.csv`, csv);
+  }
+  log(`Exported ${recImu.length} IMU rows, ${recAud.length} audio rows.`);
+});
+$('btnClear').addEventListener('click', () => {
+  recImu = []; recAud = [];
+  stat = { pkts:0, imu:0, aud:0, dropImu:0, dropAud:0 };
+  updateStatsUI();
+  log('Buffers cleared.');
+});
+
+log('Ready. Click "Connect device" to pair over Web Bluetooth.');
+</script>
+</body>
+</html>
