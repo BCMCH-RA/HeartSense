@@ -147,16 +147,27 @@
       </div>
 
       <div class="panel">
+        <h3>Recording</h3>
+        <button class="primary" id="btnRecStart" disabled>Start recording</button>
+        <button class="stop" id="btnRecStop" disabled>Stop recording</button>
+        <div class="kv"><span><span class="dot" id="dotRec"></span>Status</span><span id="recStatus">idle</span></div>
+        <div class="kv"><span>Duration</span><span id="recDuration">00:00</span></div>
+        <div class="kv"><span>Recorded IMU</span><span id="recCountImu">0</span></div>
+        <div class="kv"><span>Recorded audio</span><span id="recCountAud">0</span></div>
+        <button class="ghost" id="btnRefresh" style="margin-top:8px;">Refresh data</button>
+      </div>
+
+      <div class="panel">
         <h3>Session</h3>
         <div class="kv"><span>Packets</span><span id="statPkts">0</span></div>
         <div class="kv"><span>IMU samples</span><span id="statImu">0</span></div>
         <div class="kv"><span>Audio samples</span><span id="statAud">0</span></div>
         <div class="kv"><span>Dropped (device)</span><span id="statDrop">0 / 0</span></div>
         <div class="kv"><span>Packet rate</span><span id="statPktRate">0 /s</span></div>
-        <div class="footer-row">
-          <button class="ghost" id="btnExport">Export CSV</button>
-          <button class="ghost" id="btnClear">Clear</button>
-        </div>
+        <button class="ghost" id="btnExportImuCsv" style="margin-top:8px;">Download IMU (.csv)</button>
+        <button class="ghost" id="btnExportAudCsv">Download audio (.csv)</button>
+        <button class="ghost" id="btnExportWav">Download audio (.wav)</button>
+        <button class="ghost" id="btnClear">Clear all</button>
       </div>
     </div>
 
@@ -245,6 +256,16 @@ let recImuGx = new GrowableArray(Int16Array), recImuGy = new GrowableArray(Int16
 let recAudT  = new GrowableArray(Float64Array);
 let recAudV  = new GrowableArray(Uint8Array);
 
+// Recording is a separate concept from device-side streaming: streaming
+// controls whether the ESP32 is sending BLE packets at all (power/bandwidth
+// on the device); recording controls whether the *browser* is appending
+// incoming samples into the exportable buffers above. This lets you watch
+// live waveforms without committing anything to memory/disk until you're
+// ready to capture a session.
+let recording = false;
+let recordStartMs = null;
+let firstAudioRateHz = null; // sample rate captured for the WAV header
+
 // ---------------------------------------------------------------------------
 // UI helpers
 // ---------------------------------------------------------------------------
@@ -265,7 +286,11 @@ function setConn(state){
   $('btnDisconnect').disabled = !state;
   $('btnStart').disabled = !state;
   $('btnApplyConfig').disabled = !state;
-  if(!state){ $('btnStop').disabled = true; $('dotSync').className='dot'; $('syncText').textContent='not synced'; }
+  $('btnRecStart').disabled = !state || recording;
+  if(!state){
+    $('btnStop').disabled = true; $('dotSync').className='dot'; $('syncText').textContent='not synced';
+    stopRecording();
+  }
 }
 
 if (!navigator.bluetooth) { $('httpsWarning').style.display = 'block'; }
@@ -355,6 +380,45 @@ $('audioRate').addEventListener('change', e => $('audioRateVal').textContent = e
 $('pktInterval').addEventListener('input', e => $('pktIntervalVal').textContent = e.target.value + ' ms');
 
 // ---------------------------------------------------------------------------
+// Recording start/stop (browser-side capture, independent of BLE streaming)
+// ---------------------------------------------------------------------------
+function startRecording(){
+  if (recording) return;
+  recording = true;
+  recordStartMs = performance.now();
+  firstAudioRateHz = null;
+  $('btnRecStart').disabled = true;
+  $('btnRecStop').disabled = false;
+  $('dotRec').className = 'dot on';
+  $('recStatus').textContent = 'recording';
+  log('Recording started.', 'ok');
+}
+function stopRecording(){
+  if (!recording) return;
+  recording = false;
+  $('btnRecStart').disabled = !connected;
+  $('btnRecStop').disabled = true;
+  $('dotRec').className = 'dot';
+  $('recStatus').textContent = 'stopped';
+  log('Recording stopped.');
+  refreshRecordingStats();
+}
+function refreshRecordingStats(){
+  $('recCountImu').textContent = recImuT.len;
+  $('recCountAud').textContent = recAudT.len;
+  if (recording && recordStartMs !== null) {
+    const s = Math.floor((performance.now() - recordStartMs) / 1000);
+    const mm = String(Math.floor(s / 60)).padStart(2, '0');
+    const ss = String(s % 60).padStart(2, '0');
+    $('recDuration').textContent = `${mm}:${ss}`;
+  }
+}
+$('btnRecStart').addEventListener('click', startRecording);
+$('btnRecStop').addEventListener('click', stopRecording);
+$('btnRefresh').addEventListener('click', () => { refreshRecordingStats(); log('Data refreshed.'); });
+setInterval(refreshRecordingStats, 1000); // live duration/count ticker while recording
+
+// ---------------------------------------------------------------------------
 // Status notifications (plain text from device)
 // ---------------------------------------------------------------------------
 function onStatusNotify(ev){
@@ -391,15 +455,21 @@ function onDataNotify(ev){
     const gy = dv.getInt16(off, true); off += 2;
     const gz = dv.getInt16(off, true); off += 2;
     const t = baseMs + Math.round(i * 1000 / (imuRate || 200));
-    const sample = { t, ax, ay, az, gx, gy, gz };
-    pushImuSample(sample);
-    if (recImu.length < MAX_RECORD_ROWS) recImu.push(sample);
+    pushImuSample(t, ax, ay, az, gx, gy, gz);   // updates scope + BPM estimate, no allocation
+    if (recording && recImuT.len < MAX_SAMPLES) {
+      recImuT.push(t);
+      recImuAx.push(ax); recImuAy.push(ay); recImuAz.push(az);
+      recImuGx.push(gx); recImuGy.push(gy); recImuGz.push(gz);
+    }
   }
   for (let i = 0; i < nAud; i++) {
     const v = dv.getUint8(off); off += 1;
     const t = baseMs + Math.round(i * 1000 / (audRate || 2000));
     pushAudSample(v);
-    if (recAud.length < MAX_RECORD_ROWS) recAud.push({ t, v });
+    if (recording && recAudT.len < MAX_SAMPLES) {
+      if (firstAudioRateHz === null) firstAudioRateHz = audRate || 2000;
+      recAudT.push(t); recAudV.push(v);
+    }
   }
 
   stat.pkts++; stat.imu += nImu; stat.aud += nAud;
@@ -487,8 +557,8 @@ let emaSlow = 1.0, emaFast = 0;
 let lastBeatT = 0, bpmSmoothed = 0;
 let rmsEma = 0.02;
 
-function pushImuSample(s){
-  const ax = s.ax/16384, ay = s.ay/16384, az = s.az/16384;
+function pushImuSample(t, axRaw, ayRaw, azRaw, gxRaw, gyRaw, gzRaw){
+  const ax = axRaw/16384, ay = ayRaw/16384, az = azRaw/16384;
   const mag = Math.sqrt(ax*ax + ay*ay + az*az);
 
   emaSlow += (mag - emaSlow) * 0.01;      // ~slow baseline (gravity + drift)
@@ -500,7 +570,7 @@ function pushImuSample(s){
   accelPtr = (accelPtr + 1) % ACCEL_BUF_N;
 
   const threshold = rmsEma * 2.2;
-  const nowT = s.t;
+  const nowT = t;
   if (emaFast > threshold && (nowT - lastBeatT) > 300) { // 300ms refractory -> max 200bpm
     if (lastBeatT > 0) {
       const instBpm = 60000 / (nowT - lastBeatT);
@@ -533,29 +603,81 @@ function download(filename, text){
   a.href = url; a.download = filename; a.click();
   URL.revokeObjectURL(url);
 }
-$('btnExport').addEventListener('click', () => {
-  if (recImu.length){
-    let csv = 'epoch_ms,utc_iso,ist,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps\n';
-    for (const s of recImu){
-      csv += [s.t, new Date(s.t).toISOString(), toISTString(s.t),
-              (s.ax/16384).toFixed(5), (s.ay/16384).toFixed(5), (s.az/16384).toFixed(5),
-              (s.gx/131).toFixed(3), (s.gy/131).toFixed(3), (s.gz/131).toFixed(3)].join(',') + '\n';
-    }
-    download(`heartsense_imu_${Date.now()}.csv`, csv);
+$('btnExportImuCsv').addEventListener('click', () => {
+  const n = recImuT.len;
+  if (!n) { log('No IMU data recorded yet.', 'err'); return; }
+  const t = recImuT.view(), ax = recImuAx.view(), ay = recImuAy.view(), az = recImuAz.view();
+  const gx = recImuGx.view(), gy = recImuGy.view(), gz = recImuGz.view();
+  const rows = ['epoch_ms,utc_iso,ist,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps'];
+  for (let i = 0; i < n; i++){
+    rows.push([t[i], new Date(t[i]).toISOString(), toISTString(t[i]),
+               (ax[i]/16384).toFixed(5), (ay[i]/16384).toFixed(5), (az[i]/16384).toFixed(5),
+               (gx[i]/131).toFixed(3), (gy[i]/131).toFixed(3), (gz[i]/131).toFixed(3)].join(','));
   }
-  if (recAud.length){
-    let csv = 'epoch_ms,utc_iso,ist,adc_8bit\n';
-    for (const s of recAud){
-      csv += [s.t, new Date(s.t).toISOString(), toISTString(s.t), s.v].join(',') + '\n';
-    }
-    download(`heartsense_audio_${Date.now()}.csv`, csv);
-  }
-  log(`Exported ${recImu.length} IMU rows, ${recAud.length} audio rows.`);
+  download(`heartsense_imu_${Date.now()}.csv`, rows.join('\n') + '\n');
+  log(`Downloaded ${n} IMU rows (.csv).`);
 });
+
+$('btnExportAudCsv').addEventListener('click', () => {
+  const n = recAudT.len;
+  if (!n) { log('No audio data recorded yet.', 'err'); return; }
+  const t = recAudT.view(), v = recAudV.view();
+  const rows = ['epoch_ms,utc_iso,ist,adc_8bit'];
+  for (let i = 0; i < n; i++){
+    rows.push([t[i], new Date(t[i]).toISOString(), toISTString(t[i]), v[i]].join(','));
+  }
+  download(`heartsense_audio_${Date.now()}.csv`, rows.join('\n') + '\n');
+  log(`Downloaded ${n} audio rows (.csv).`);
+});
+
+// WAV export: our mic bytes are already 8-bit unsigned (0-255, ~128 = mid-
+// scale silence, since the firmware sends the top 8 bits of a 12-bit ADC
+// reading biased at Vcc/2) — i.e. already in WAV's native 8-bit PCM format,
+// so this is just a 44-byte header in front of the raw bytes, no per-sample
+// conversion needed.
+function buildWavHeader(numSamples, sampleRateHz){
+  const buf = new ArrayBuffer(44);
+  const dv = new DataView(buf);
+  const writeStr = (offset, str) => { for (let i=0;i<str.length;i++) dv.setUint8(offset+i, str.charCodeAt(i)); };
+  const byteRate = sampleRateHz;   // 1 channel * 1 byte/sample
+  const dataSize = numSamples;     // 1 byte per sample
+  writeStr(0, 'RIFF');
+  dv.setUint32(4, 36 + dataSize, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  dv.setUint32(16, 16, true);      // PCM fmt chunk size
+  dv.setUint16(20, 1, true);       // PCM
+  dv.setUint16(22, 1, true);       // mono
+  dv.setUint32(24, sampleRateHz, true);
+  dv.setUint32(28, byteRate, true);
+  dv.setUint16(32, 1, true);       // block align
+  dv.setUint16(34, 8, true);       // bits per sample
+  writeStr(36, 'data');
+  dv.setUint32(40, dataSize, true);
+  return buf;
+}
+$('btnExportWav').addEventListener('click', () => {
+  const n = recAudT.len;
+  if (!n) { log('No audio data recorded yet.', 'err'); return; }
+  const rateHz = firstAudioRateHz || 2000;
+  const header = buildWavHeader(n, rateHz);
+  const blob = new Blob([header, recAudV.view()], { type: 'audio/wav' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `heartsense_audio_${Date.now()}.wav`; a.click();
+  URL.revokeObjectURL(url);
+  log(`Downloaded ${n} audio samples (.wav @ ${rateHz}Hz).`);
+});
+
 $('btnClear').addEventListener('click', () => {
-  recImu = []; recAud = [];
+  recImuT.clear(); recImuAx.clear(); recImuAy.clear(); recImuAz.clear();
+  recImuGx.clear(); recImuGy.clear(); recImuGz.clear();
+  recAudT.clear(); recAudV.clear();
+  firstAudioRateHz = null;
   stat = { pkts:0, imu:0, aud:0, dropImu:0, dropAud:0 };
   updateStatsUI();
+  refreshRecordingStats();
+  $('recDuration').textContent = '00:00';
   log('Buffers cleared.');
 });
 
