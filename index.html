@@ -254,7 +254,7 @@ let recImuT  = new GrowableArray(Float64Array);
 let recImuAx = new GrowableArray(Int16Array), recImuAy = new GrowableArray(Int16Array), recImuAz = new GrowableArray(Int16Array);
 let recImuGx = new GrowableArray(Int16Array), recImuGy = new GrowableArray(Int16Array), recImuGz = new GrowableArray(Int16Array);
 let recAudT  = new GrowableArray(Float64Array);
-let recAudV  = new GrowableArray(Uint8Array);
+let recAudV  = new GrowableArray(Uint16Array);  // full 12-bit ADC values, 0-4095
 
 // Recording is a separate concept from device-side streaming: streaming
 // controls whether the ESP32 is sending BLE packets at all (power/bandwidth
@@ -463,7 +463,7 @@ function onDataNotify(ev){
     }
   }
   for (let i = 0; i < nAud; i++) {
-    const v = dv.getUint8(off); off += 1;
+    const v = dv.getUint16(off, true); off += 2;  // full 12-bit ADC reading (0-4095)
     const t = baseMs + Math.round(i * 1000 / (audRate || 2000));
     pushAudSample(v);
     if (recording && recAudT.len < MAX_SAMPLES) {
@@ -585,7 +585,7 @@ function pushImuSample(t, axRaw, ayRaw, azRaw, gxRaw, gyRaw, gzRaw){
 }
 
 function pushAudSample(v){
-  audioBuf[audioPtr] = (v - 128) / 128;
+  audioBuf[audioPtr] = (v - 2048) / 2048;   // 12-bit reading, mid-scale ~2048
   audioPtr = (audioPtr + 1) % AUDIO_BUF_N;
 }
 
@@ -622,7 +622,7 @@ $('btnExportAudCsv').addEventListener('click', () => {
   const n = recAudT.len;
   if (!n) { log('No audio data recorded yet.', 'err'); return; }
   const t = recAudT.view(), v = recAudV.view();
-  const rows = ['epoch_ms,utc_iso,ist,adc_8bit'];
+  const rows = ['epoch_ms,utc_iso,ist,adc_12bit'];
   for (let i = 0; i < n; i++){
     rows.push([t[i], new Date(t[i]).toISOString(), toISTString(t[i]), v[i]].join(','));
   }
@@ -630,17 +630,19 @@ $('btnExportAudCsv').addEventListener('click', () => {
   log(`Downloaded ${n} audio rows (.csv).`);
 });
 
-// WAV export: our mic bytes are already 8-bit unsigned (0-255, ~128 = mid-
-// scale silence, since the firmware sends the top 8 bits of a 12-bit ADC
-// reading biased at Vcc/2) — i.e. already in WAV's native 8-bit PCM format,
-// so this is just a 44-byte header in front of the raw bytes, no per-sample
-// conversion needed.
-function buildWavHeader(numSamples, sampleRateHz){
+// WAV export: recAudV holds full 12-bit unsigned ADC readings (0-4095,
+// mid-scale ~2048), but WAV's PCM format expects signed samples. We convert
+// to 16-bit signed here (scaling 12-bit range up to use the full 16-bit
+// headroom) rather than storing 16-bit signed throughout, since the BLE
+// wire format and recording buffers only need to carry the ADC's actual
+// 12 bits of information -- the conversion is just for player compatibility.
+function buildWavHeader16(numSamples, sampleRateHz){
   const buf = new ArrayBuffer(44);
   const dv = new DataView(buf);
   const writeStr = (offset, str) => { for (let i=0;i<str.length;i++) dv.setUint8(offset+i, str.charCodeAt(i)); };
-  const byteRate = sampleRateHz;   // 1 channel * 1 byte/sample
-  const dataSize = numSamples;     // 1 byte per sample
+  const bytesPerSample = 2;
+  const byteRate = sampleRateHz * bytesPerSample;
+  const dataSize = numSamples * bytesPerSample;
   writeStr(0, 'RIFF');
   dv.setUint32(4, 36 + dataSize, true);
   writeStr(8, 'WAVE');
@@ -650,8 +652,8 @@ function buildWavHeader(numSamples, sampleRateHz){
   dv.setUint16(22, 1, true);       // mono
   dv.setUint32(24, sampleRateHz, true);
   dv.setUint32(28, byteRate, true);
-  dv.setUint16(32, 1, true);       // block align
-  dv.setUint16(34, 8, true);       // bits per sample
+  dv.setUint16(32, bytesPerSample, true);  // block align
+  dv.setUint16(34, 16, true);              // bits per sample
   writeStr(36, 'data');
   dv.setUint32(40, dataSize, true);
   return buf;
@@ -660,8 +662,13 @@ $('btnExportWav').addEventListener('click', () => {
   const n = recAudT.len;
   if (!n) { log('No audio data recorded yet.', 'err'); return; }
   const rateHz = firstAudioRateHz || 2000;
-  const header = buildWavHeader(n, rateHz);
-  const blob = new Blob([header, recAudV.view()], { type: 'audio/wav' });
+  const raw = recAudV.view();
+  const pcm = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    pcm[i] = Math.max(-32768, Math.min(32767, (raw[i] - 2048) * 8));
+  }
+  const header = buildWavHeader16(n, rateHz);
+  const blob = new Blob([header, pcm.buffer], { type: 'audio/wav' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = `heartsense_audio_${Date.now()}.wav`; a.click();
